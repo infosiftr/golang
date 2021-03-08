@@ -184,7 +184,7 @@
       "buster",
       "stretch",
       "alpine3.13",
-      "alpine3.12",
+      "alpine3.12.4",
       "windows/windowsservercore-1809",
       "windows/windowsservercore-ltsc2016",
       "windows/nanoserver-1809"
