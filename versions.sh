@@ -88,29 +88,87 @@ goVersions="$(
 for version in "${versions[@]}"; do
 	export version
 
-	if \
-		! goJson="$(jq <<<"$goVersions" -c '
-			[ .[] | select(.major == env.version) ] | sort_by(
-				.version
-				| split(".")
-				| map(
-					if test("^[0-9]+$") then
-						tonumber
-					else . end
-				)
-			)[-1]
-		')" \
-		|| ! fullVersion="$(jq <<<"$goJson" -r '.version')" \
-		|| [ -z "$fullVersion" ] \
-	; then
-		echo >&2 "warning: cannot find full version for $version"
-		continue
-	fi
+	case "$version" in
+		tip)
+			# clamp so we don't update too frequently (https://github.com/docker-library/golang/issues/464#issuecomment-1587758290, https://github.com/docker-library/faq#can-i-use-a-bot-to-make-my-image-update-prs)
+			# https://github.com/golang/go
+			# https://go.googlesource.com/go
+			snapshotDate="$(date --utc --date 'last monday 00:00:00' '+%s')"
+			snapshotDateStr="$(date --utc --date "@$snapshotDate" '+%Y-%m-%d @ %H:%I:%S')"
+			commits="$(
+				# wget -qO- 'https://go.googlesource.com/go/+log/refs/heads/master?format=JSON' # has a bug of the first line being ")]}'" for some reason, and the dates are *super* cursed ("Mon Dec 04 10:00:41 2023 -0800") -- even date(1) doesn't want to parse them ("date: invalid date ‘Mon Dec 04 10:00:41 2023 -0800’")
+				wget -qO- --header 'Accept: application/json' 'https://github.com/golang/go/commits/HEAD.atom' \
+					| jq -r '
+						.payload.commitGroups[].commits[]
+						| first([ .committedDate, .authoredDate ] | sort | reverse[]) as $date
+						| "\(.oid) \($date)"
+						| @sh
+					'
+			)"
+			eval "commitDates=( $commits )"
+			fullVersion=
+			date=
+			for commitDate in "${commitDates[@]}"; do
+				commit="${commitDate%%[[:space:]]*}"
+				date="${commitDate#$commit[[:space:]]}"
+				[ "$commit" != "$date" ] # sanity check
+				date="$(date --utc --date "$date" '+%s')"
+				if [ "$date" -le "$snapshotDate" ]; then
+					fullVersion="$commit"
+					break
+				fi
+			done
+			if [ -z "$fullVersion" ]; then
+				echo >&2 "warning: cannot find full version for $version (maybe too many commits since $snapshotDateStr?)"
+				continue
+			fi
+			dateStr="$(date --utc --date "@$date" '+%Y-%m-%d @ %H:%I:%S')"
+			url="https://github.com/golang/go/archive/$fullVersion.tar.gz"
+			sha256="$(wget -qO- "$url" | sha256sum | cut -d' ' -f1)" # 😭 (this is not fast)
+			goJson="$(
+				export fullVersion dateStr url sha256
+				jq -nc '
+					{
+						version: env.fullVersion,
+						date: env.dateStr,
+						arches: {
+							src: {
+								url: env.url,
+								sha256: env.sha256,
+							},
+						},
+					}
+				'
+			)"
+			;;
+
+		*)
+			if \
+				! goJson="$(jq <<<"$goVersions" -c '
+					[ .[] | select(.major == env.version) ] | sort_by(
+						.version
+						| split(".")
+						| map(
+							if test("^[0-9]+$") then
+								tonumber
+							else . end
+						)
+					)[-1]
+				')" \
+				|| ! fullVersion="$(jq <<<"$goJson" -r '.version')" \
+				|| [ -z "$fullVersion" ] \
+			; then
+				echo >&2 "warning: cannot find full version for $version"
+				continue
+			fi
+			;;
+	esac
 
 	echo "$version: $fullVersion"
 
 	doc="$(jq <<<"$goJson" -c --argjson potentiallySupportedArches "$potentiallySupportedArches" '{
 		version: .version,
+		date: .date,
 		arches: (
 			.arches
 			| . += (
@@ -131,8 +189,12 @@ for version in "${versions[@]}"; do
 			| with_entries(
 				.key as $bashbrewArch
 				| .value.supported = (
-					# https://github.com/docker-library/golang/pull/500#issuecomment-1863578601 - as of Go 1.21+, we no longer build from source
-					(.value.url or ([ "1.20" ] | index(env.version | rtrimstr("-rc"))))
+					(
+						(.key != "src" and .value.url)
+						or env.version == "tip"
+						# https://github.com/docker-library/golang/pull/500#issuecomment-1863578601 - as of Go 1.21+, we no longer build from source (except for tip builds)
+						or ([ "1.20" ] | index(env.version | rtrimstr("-rc")))
+					)
 					and ($potentiallySupportedArches | index($bashbrewArch))
 				)
 				| .value.env +=
@@ -159,7 +221,7 @@ for version in "${versions[@]}"; do
 				"3.18",
 				empty
 			| "alpine" + .),
-			if .arches | has("windows-amd64") and .["windows-amd64"].url then
+			if .arches | has("windows-amd64") and .["windows-amd64"].url then # TODO consider windows + tip
 				(
 					"ltsc2022",
 					"1809",
@@ -172,7 +234,7 @@ for version in "${versions[@]}"; do
 				| "windows/nanoserver-" + .)
 			else empty end
 		],
-	}')"
+	} | if .date then . else del(.date) end')"
 
 	json="$(jq <<<"$json" -c --argjson doc "$doc" '.[env.version] = $doc')"
 done
