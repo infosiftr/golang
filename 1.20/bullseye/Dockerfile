@@ -153,6 +153,6 @@ ENV GOLANG_VERSION 1.20.13
 
 ENV GOPATH /go
 ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
-COPY --from=build --link /usr/local/go/ /usr/local/go/
 RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 1777 "$GOPATH"
 WORKDIR $GOPATH
+COPY --from=build --link /usr/local/go/ /usr/local/go/
