@@ -4,11 +4,15 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM buildpack-deps:bookworm-scm AS build
+FROM --platform=$BUILDPLATFORM golang:bookworm AS bootstrap
+FROM buildpack-deps:bookworm-scm AS target
+RUN dpkg --print-architecture > /arch
+FROM --platform=$BUILDPLATFORM buildpack-deps:bookworm-scm AS build
 
 ENV PATH /usr/local/go/bin:$PATH
 
-COPY --from=golang:bookworm /usr/local/go /usr/local/goroot-bootstrap
+COPY --from=bootstrap /usr/local/go /usr/local/goroot-bootstrap
+COPY --from=target /arch /target-arch
 
 # tip-20240810: https://github.com/golang/go/tree/d36353499f673c89a267a489beb80133a14a75f9
 ARG GOLANG_COMMIT='d36353499f673c89a267a489beb80133a14a75f9'
@@ -17,6 +21,9 @@ ENV GOLANG_COMMIT $GOLANG_COMMIT
 RUN set -eux; \
 	now="$(date '+%s')"; \
 	arch="$(dpkg --print-architecture)"; arch="${arch##*-}"; \
+# TODO something cleaner here/above 😂😭
+# TODO we need to *also* set GOHOST* based on the userspace of *this* container!! (ie, if our userspace is i386 but our actual underlying host is amd64 but we're building for arm64, then we need to set GOHOSTARCH=386 but GOARCH=arm64)
+	arch="$(cat /target-arch)"; \
 	case "$arch" in \
 		'amd64') \
 			export GOAMD64='v1' GOARCH='amd64' GOOS='linux'; \
@@ -67,12 +74,7 @@ RUN set -eux; \
 	[ "$SOURCE_DATE_EPOCH" -lt "$now" ]; \
 	\
 	( \
-		export \
-			GOCACHE='/tmp/gocache' \
-# set GOHOST* to make sure explicitly 32bit builds on 64bit infra work correctly
-			GOHOSTOS="$GOOS" \
-			GOHOSTARCH="$GOARCH" \
-		; \
+		export GOCACHE='/tmp/gocache'; \
 		\
 		cd /usr/local/go/src; \
 		./make.bash; \
@@ -89,6 +91,13 @@ RUN set -eux; \
 			"$GOCACHE" \
 		; \
 		\
+# by default, our "host" binaries end up in /usr/local/go/bin and "target" binaries in /usr/local/go/bin/GOOS_GOARCH, so we have to move those up a level to match a native build (relevant for 32bit builds on 64bit, for example)
+		if [ -d "/usr/local/go/bin/${GOOS}_${GOARCH}" ]; then \
+			mv "/usr/local/go/bin/${GOOS}_${GOARCH}" /usr/local/go/bin.real; \
+			rm -rf /usr/local/go/bin; \
+			mv /usr/local/go/bin.real /usr/local/go/bin; \
+		fi; \
+		\
 # clamp timestamps for reproducibility (allows "COPY --link" to be more clever/useful)
 		touch -t "$touchy" /usr/local/.go-date-stamp; \
 		find /usr/local/go -depth -newer /usr/local/.go-date-stamp -exec touch -ht "$touchy" '{}' +; \
@@ -103,6 +112,7 @@ RUN set -eux; \
 	\
 # smoke test
 	go version; \
+	go version | grep -qF "$GOOS/$GOARCH"; \
 # make sure our reproducibile timestamp is probably still correct (best-effort inline reproducibility test)
 	epoch="$(stat -c '%Y' /target/usr/local/go)"; \
 	[ "$SOURCE_DATE_EPOCH" = "$epoch" ]; \

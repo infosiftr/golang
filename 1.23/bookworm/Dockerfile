@@ -4,7 +4,7 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM buildpack-deps:bookworm-scm AS build
+FROM --platform=$BUILDPLATFORM buildpack-deps:bookworm-scm AS build
 
 ENV PATH /usr/local/go/bin:$PATH
 
@@ -97,6 +97,7 @@ RUN set -eux; \
 	\
 # smoke test
 	go version; \
+	go version | grep -qF "$GOOS/$GOARCH"; \
 # make sure our reproducibile timestamp is probably still correct (best-effort inline reproducibility test)
 	epoch="$(stat -c '%Y' /target/usr/local/go)"; \
 	[ "$SOURCE_DATE_EPOCH" = "$epoch" ]; \

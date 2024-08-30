@@ -4,7 +4,7 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM alpine:3.19 AS build
+FROM --platform=$BUILDPLATFORM alpine:3.19 AS build
 
 ENV PATH /usr/local/go/bin:$PATH
 
@@ -105,6 +105,7 @@ RUN set -eux; \
 	\
 # smoke test
 	go version; \
+	go version | grep -qF "$GOOS/$GOARCH"; \
 # make sure our reproducibile timestamp is probably still correct (best-effort inline reproducibility test)
 	epoch="$(stat -c '%Y' /target/usr/local/go)"; \
 	[ "$SOURCE_DATE_EPOCH" = "$epoch" ]; \

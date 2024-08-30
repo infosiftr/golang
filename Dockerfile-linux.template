@@ -4,19 +4,28 @@
 	;
 	def alpine_version:
 		env.variant | ltrimstr("alpine")
+	;
+	def from:
+		if is_alpine then
+			"alpine:\( alpine_version )"
+		else
+			"buildpack-deps:\( env.variant )-scm"
+		end
 -}}
-{{ if is_alpine then ( -}}
-FROM alpine:{{ alpine_version }} AS build
-{{ ) else ( -}}
-FROM buildpack-deps:{{ env.variant }}-scm AS build
-{{ ) end -}}
+{{ if env.version == "tip" then ( -}}
+FROM --platform=$BUILDPLATFORM golang:{{ env.variant }} AS bootstrap
+FROM {{ from }} AS target
+RUN {{ if is_alpine then "apk --print-arch" else "dpkg --print-architecture" end }} > /arch
+{{ ) else "" end -}}
+FROM --platform=$BUILDPLATFORM {{ from }} AS build
 
 ENV PATH /usr/local/go/bin:$PATH
 
 {{ if env.version != "tip" then ( -}}
 ENV GOLANG_VERSION {{ .version }}
 {{ ) else ( -}}
-COPY --from=golang:{{ env.variant }} /usr/local/go /usr/local/goroot-bootstrap
+COPY --from=bootstrap /usr/local/go /usr/local/goroot-bootstrap
+COPY --from=target /arch /target-arch
 
 # {{ .version }}: https://github.com/golang/go/tree/{{ .commit.version }}
 ARG GOLANG_COMMIT={{ .commit.version | @sh }}
@@ -76,6 +85,11 @@ RUN set -eux; \
 {{ ) else ( -}}
 	arch="$(dpkg --print-architecture)"; arch="${arch##*-}"; \
 {{ ) end -}}
+{{ if env.version == "tip" then ( -}}
+# TODO something cleaner here/above 😂😭
+# TODO we need to *also* set GOHOST* based on the userspace of *this* container!! (ie, if our userspace is i386 but our actual underlying host is amd64 but we're building for arm64, then we need to set GOHOSTARCH=386 but GOARCH=arm64)
+	arch="$(cat /target-arch)"; \
+{{ ) else "" end -}}
 {{ if env.version != "tip" then ( -}}
 	url=; \
 {{ ) else "" end -}}
@@ -149,12 +163,7 @@ RUN set -eux; \
 	\
 {{ if env.version == "tip" then ( -}}
 	( \
-		export \
-			GOCACHE='/tmp/gocache' \
-# set GOHOST* to make sure explicitly 32bit builds on 64bit infra work correctly
-			GOHOSTOS="$GOOS" \
-			GOHOSTARCH="$GOARCH" \
-		; \
+		export GOCACHE='/tmp/gocache'; \
 		\
 		cd /usr/local/go/src; \
 		./make.bash; \
@@ -170,6 +179,13 @@ RUN set -eux; \
 			/usr/local/go/src/cmd/dist/dist \
 			"$GOCACHE" \
 		; \
+		\
+# by default, our "host" binaries end up in /usr/local/go/bin and "target" binaries in /usr/local/go/bin/GOOS_GOARCH, so we have to move those up a level to match a native build (relevant for 32bit builds on 64bit, for example)
+		if [ -d "/usr/local/go/bin/${GOOS}_${GOARCH}" ]; then \
+			mv "/usr/local/go/bin/${GOOS}_${GOARCH}" /usr/local/go/bin.real; \
+			rm -rf /usr/local/go/bin; \
+			mv /usr/local/go/bin.real /usr/local/go/bin; \
+		fi; \
 		\
 # clamp timestamps for reproducibility (allows "COPY --link" to be more clever/useful)
 		touch -t "$touchy" /usr/local/.go-date-stamp; \
@@ -204,18 +220,17 @@ RUN set -eux; \
 {{ ) else "" end -}}
 # smoke test
 	go version; \
+	go version | grep -qF "$GOOS/$GOARCH"; \
 # make sure our reproducibile timestamp is probably still correct (best-effort inline reproducibility test)
 	epoch="$(stat -c '%Y' /target/usr/local/go)"; \
 	[ "$SOURCE_DATE_EPOCH" = "$epoch" ]; \
 	find /target -newer /target/usr/local/go -exec sh -c 'ls -ld "$@" && exit "$#"' -- '{}' +
 
-{{ if is_alpine then ( -}}
-FROM alpine:{{ alpine_version }}
+FROM {{ from }}
 
+{{ if is_alpine then ( -}}
 RUN apk add --no-cache ca-certificates
 {{ ) else ( -}}
-FROM buildpack-deps:{{ env.variant }}-scm
-
 # install cgo-related dependencies
 RUN set -eux; \
 	apt-get update; \
