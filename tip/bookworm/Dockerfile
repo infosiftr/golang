@@ -4,11 +4,17 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM buildpack-deps:bookworm-scm AS build
+FROM --platform=$TARGETPLATFORM buildpack-deps:bookworm-scm AS target
+RUN dpkg --print-architecture | tee /dpkg-architecture >&2
+
+FROM --platform=$BUILDPLATFORM golang:bookworm AS bootstrap
+
+FROM --platform=$BUILDPLATFORM buildpack-deps:bookworm-scm AS build
 
 ENV PATH /usr/local/go/bin:$PATH
 
-COPY --from=golang:bookworm /usr/local/go /usr/local/goroot-bootstrap
+COPY --from=bootstrap /usr/local/go /usr/local/goroot-bootstrap
+COPY --from=target /dpkg-architecture /
 
 # tip-20250223: https://github.com/golang/go/tree/fba83cdfc6c4818af5b773afa39e457d16a6db7a
 ARG GOLANG_COMMIT='fba83cdfc6c4818af5b773afa39e457d16a6db7a'
@@ -16,7 +22,7 @@ ENV GOLANG_COMMIT $GOLANG_COMMIT
 
 RUN set -eux; \
 	now="$(date '+%s')"; \
-	arch="$(dpkg --print-architecture)"; arch="${arch##*-}"; \
+	arch="$(cat /dpkg-architecture)"; arch="${arch##*-}"; \
 	case "$arch" in \
 		'amd64') \
 			export GOAMD64='v1' GOARCH='amd64' GOOS='linux'; \
@@ -66,15 +72,16 @@ RUN set -eux; \
 	[ "$SOURCE_DATE_EPOCH" -lt "$now" ]; \
 	\
 	( \
-		export \
-			GOCACHE='/tmp/gocache' \
-# set GOHOST* to make sure explicitly 32bit builds on 64bit infra work correctly
-			GOHOSTOS="$GOOS" \
-			GOHOSTARCH="$GOARCH" \
-		; \
+		export GOCACHE='/tmp/gocache'; \
 		\
 		cd /usr/local/go/src; \
 		./make.bash; \
+		\
+		if [ -s "../bin/${GOOS}_${GOARCH}/go" ]; then \
+			rm ../bin/go*; \
+			mv "../bin/${GOOS}_${GOARCH}"/go* ../bin; \
+			rmdir "../bin/${GOOS}_${GOARCH}"; \
+		fi; \
 		\
 # remove a few intermediate / bootstrapping files the official binary release tarballs do not contain (and ".git" that is hard to make reproducible)
 		rm -rf \
@@ -107,7 +114,7 @@ RUN set -eux; \
 	[ "$SOURCE_DATE_EPOCH" = "$epoch" ]; \
 	find /target -newer /target/usr/local/go -exec sh -c 'ls -ld "$@" && exit "$#"' -- '{}' +
 
-FROM buildpack-deps:bookworm-scm
+FROM --platform=$TARGETPLATFORM buildpack-deps:bookworm-scm
 
 # install cgo-related dependencies
 RUN set -eux; \
